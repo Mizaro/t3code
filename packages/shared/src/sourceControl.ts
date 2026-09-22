@@ -204,6 +204,28 @@ function isBitbucketHost(host: string): boolean {
   return host === "bitbucket.org" || hasDnsLabel(host, "bitbucket");
 }
 
+/**
+ * The repository path a Bitbucket Server checkout already records.
+ *
+ * An HTTPS clone is `https://host/scm/{project}/{repo}.git`, which normalizes to
+ * `host/scm/{project}/{repo}`. The browser URL
+ * (`/projects/{project}/repos/{repo}/pull-requests/{n}`) is a different spelling of that same
+ * repository, so a link stores the checkout's path rather than the browser's.
+ */
+export function bitbucketServerRepositoryPath(project: string, slug: string): string {
+  return `scm/${project}/${slug}`.toLowerCase();
+}
+
+/** The project key and repository slug inside a Server checkout path, or null for anything else. */
+export function parseBitbucketServerRepositoryPath(
+  repository: string,
+): { readonly project: string; readonly slug: string } | null {
+  const match = /^scm\/([^/]+)\/([^/]+)$/u.exec(repository.trim().toLowerCase());
+  const project = match?.[1];
+  const slug = match?.[2];
+  return project && slug ? { project, slug } : null;
+}
+
 export function detectSourceControlProviderFromRemoteUrl(
   remoteUrl: string,
 ): SourceControlProviderInfo | null {

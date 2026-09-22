@@ -499,6 +499,43 @@ describe("findProjectForChangeRequest", () => {
     ).toBeUndefined();
   });
 
+  it("matches a Bitbucket Server URL to the checkout that remote already records", () => {
+    // Derived from the clone URL the way the server derives it, so the link's repository stays
+    // the checkout path (`scm/{project}/{repo}`) rather than the browser's `/projects/.../repos/`.
+    const httpsRemote = "https://git.source.acme.com/scm/PROJ/t3code.git";
+    const sshRemote = "ssh://git@git.source.acme.com:7999/PROJ/t3code.git";
+    const reference = parseChangeRequestUrl(
+      "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/8623",
+    );
+    expect(reference).toEqual({
+      host: "git.source.acme.com",
+      repository: "scm/proj/t3code",
+      number: 8623,
+    });
+    for (const remoteUrl of [httpsRemote, sshRemote]) {
+      const canonicalKey = normalizeGitRemoteUrl(remoteUrl);
+      const checkout = project({
+        canonicalKey,
+        provider: "unknown",
+        displayName: canonicalKey.split("/").slice(1).join("/"),
+        locator: { remoteUrl },
+        owner: "scm",
+        name: "t3code",
+      });
+      expect(findProjectForChangeRequest([checkout], reference!)).toBe(checkout);
+      expect(findProjectOnChangeRequestHost([checkout], reference!)).toBe(checkout);
+    }
+    const github = project({
+      canonicalKey: "github.com/acme/t3code",
+      provider: "github",
+      displayName: "acme/t3code",
+      owner: "acme",
+      name: "t3code",
+    });
+    expect(findProjectForChangeRequest([github], reference!)).toBeUndefined();
+    expect(findProjectOnChangeRequestHost([github], reference!)).toBeUndefined();
+  });
+
   it("matches an Azure repository cloned over SSH, whose remote shares no part with its URL", () => {
     // Azure alone addresses one repository under two names: `ssh.dev.azure.com` and `v3/...` over
     // SSH against `dev.azure.com` and `.../_git/...` everywhere a person sees it. The identity is

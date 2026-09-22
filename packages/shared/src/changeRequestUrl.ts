@@ -1,5 +1,9 @@
 import type { RepositoryIdentity, ThreadLinkedPullRequest } from "@t3tools/contracts";
-import { canonicalRepositoryKey } from "./sourceControl.ts";
+import {
+  bitbucketServerRepositoryPath,
+  canonicalRepositoryKey,
+  parseBitbucketServerRepositoryPath,
+} from "./sourceControl.ts";
 
 /**
  * A change request named the way a thread link names one: the host below which the repository
@@ -30,8 +34,9 @@ function isHostOf(hostname: string, apex: string, label?: string): boolean {
  *
  * Each host is recognised by the path shape it alone uses, guarded by a hostname it could
  * plausibly be served from, since self-hosted installs are named whatever their admin chose:
- * GitLab's `/-/` marker is unique enough to trust on any hostname, while `/pull/` is generic
- * enough that it is only believed from a GitHub-ish host.
+ * GitLab's `/-/` marker and Bitbucket Server's `/projects/{key}/repos/{slug}/pull-requests/` are
+ * unique enough to trust on any hostname, while `/pull/` is generic enough that it is only
+ * believed from a GitHub-ish host.
  *
  * Nothing here tries to tell a lookalike hostname from a real one — `github.com.evil.test` and
  * the rest are an open set, and blocking spellings of it costs real hosts (`gitlab.com.br` is a
@@ -63,6 +68,22 @@ export function parseChangeRequestUrl(targetUrl: string): ChangeRequestLink | nu
   // separator is GitLab's own, so the hostname is not asked about.
   const gitlab = /^\/([^/]+(?:\/[^/]+)+)\/-\/merge_requests\/(\d+)(?:\/|$)/u.exec(url.pathname);
   if (gitlab) return claim(host, gitlab);
+  // Bitbucket Server / Data Center: /projects/{key}/repos/{slug}/pull-requests/{n}. The path is
+  // Server's own, so the hostname is not asked about — an install is rarely named "bitbucket".
+  // The stored repository is the checkout spelling (`scm/{key}/{slug}`), which is what
+  // `https://host/scm/{key}/{slug}.git` already normalizes to, not the browser path.
+  const bitbucketServer =
+    /^\/projects\/([^/]+)\/repos\/([^/]+)\/pull-requests\/(\d+)(?:\/|$)/u.exec(url.pathname);
+  if (bitbucketServer?.[1] && bitbucketServer[2] && bitbucketServer[3]) {
+    const number = Number(bitbucketServer[3]);
+    if (Number.isSafeInteger(number) && number > 0) {
+      return {
+        host,
+        repository: bitbucketServerRepositoryPath(bitbucketServer[1], bitbucketServer[2]),
+        number,
+      };
+    }
+  }
   // Bitbucket Cloud: /{workspace}/{repo}/pull-requests/{n}
   if (isHostOf(host, "bitbucket.org", "bitbucket")) {
     const match = /^\/([^/]+\/[^/]+)\/pull-requests\/(\d+)(?:\/|$)/u.exec(url.pathname);
@@ -113,8 +134,15 @@ export function changeRequestUrlFor(
     }
     case "gitlab":
       return `https://${host}/${repository}/-/merge_requests/${number}`;
-    case "bitbucket":
+    case "bitbucket": {
+      const server = parseBitbucketServerRepositoryPath(repository);
+      // A Server checkout's path is `scm/{project}/{repo}`. Writing that through Cloud's
+      // `/{workspace}/{repo}/pull-requests/` shape would open a URL the Server has never served.
+      if (server && !isBitbucketCloudHost(host)) {
+        return `${bitbucketServerWebOrigin(host, remoteUrl)}/projects/${server.project}/repos/${server.slug}/pull-requests/${number}`;
+      }
       return `https://${host}/${repository}/pull-requests/${number}`;
+    }
     case "azure-devops":
       return `https://${canonicalRepositoryKey(`${host}/${repository}`.toLowerCase())}/pullrequest/${number}`;
     default:
@@ -220,10 +248,50 @@ export function changeRequestRepositoryUrl(targetUrl: string): string | null {
   return url.toString();
 }
 
+function isBitbucketCloudHost(host: string): boolean {
+  const hostname = host.split(":")[0]?.toLowerCase() ?? "";
+  return hostname === "bitbucket.org" || hostname.endsWith(".bitbucket.org");
+}
+
+/** The web origin a Server remote already uses, or https on the repository host. */
+function bitbucketServerWebOrigin(host: string, remoteUrl: string | undefined): string {
+  try {
+    const remote = new URL(remoteUrl ?? "");
+    if (
+      (remote.protocol === "http:" || remote.protocol === "https:") &&
+      (remote.hostname.toLowerCase() === host.toLowerCase() ||
+        remote.host.toLowerCase() === host.toLowerCase())
+    ) {
+      return remote.origin;
+    }
+  } catch {
+    // SSH remotes do not specify the server's web origin.
+  }
+  return `https://${host}`;
+}
+
 export function siblingPullRequestUrl(url: string, number: number): string | null {
+  if (!Number.isSafeInteger(number) || number < 1) return null;
+  let sibling: URL;
+  try {
+    sibling = new URL(url);
+  } catch {
+    return null;
+  }
+  if (sibling.protocol !== "https:" && sibling.protocol !== "http:") return null;
+  // The stored repository is `scm/{project}/{repo}`, which is not a prefix of the browser path,
+  // so the generic suffix rewrite cannot see `/pull-requests/` from it.
+  const server = /^\/projects\/([^/]+)\/repos\/([^/]+)\/pull-requests\/\d+(?:\/.*)?$/u.exec(
+    sibling.pathname,
+  );
+  if (server?.[1] && server[2]) {
+    sibling.pathname = `/projects/${server[1]}/repos/${server[2]}/pull-requests/${number}`;
+    sibling.search = "";
+    sibling.hash = "";
+    return sibling.toString();
+  }
   const reference = parseChangeRequestUrl(url);
-  if (reference === null || !Number.isSafeInteger(number) || number < 1) return null;
-  const sibling = new URL(url);
+  if (reference === null) return null;
   const route = /^\/(-\/merge_requests|pulls?|pull-requests|pullrequest)\/\d+(?:\/|$)/u.exec(
     sibling.pathname.slice(reference.repository.length + 1),
   )?.[1];

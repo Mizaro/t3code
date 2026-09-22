@@ -23,6 +23,35 @@ describe("resolveLinkPullRequestInput", () => {
     ).toEqual({ link: { host, repository: "acme/web", number: 42, url } });
   });
 
+  it("links a Bitbucket Server URL when that repository is a project", () => {
+    const url = "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/8623";
+    expect(
+      resolveLinkPullRequestInput({
+        reference: ` ${url} `,
+        project: null,
+        hasProject: (candidate) =>
+          candidate.host === "git.source.acme.com" && candidate.repository === "scm/proj/t3code",
+      }),
+    ).toEqual({
+      link: {
+        host: "git.source.acme.com",
+        repository: "scm/proj/t3code",
+        number: 8623,
+        url,
+      },
+    });
+  });
+
+  it("does not treat a GitHub project as a Bitbucket Server pull request", () => {
+    expect(
+      resolveLinkPullRequestInput({
+        reference: "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/8623",
+        project,
+        hasProject: (candidate) => candidate.host === "github.com",
+      }),
+    ).toMatchObject({ error: expect.stringContaining("git.source.acme.com/scm/proj/t3code") });
+  });
+
   it("validates the full Azure repository when resolving a browser URL", () => {
     const hasProject = (reference: { host: string; repository: string }) =>
       reference.host === "dev.azure.com" && reference.repository === "org-a/project/_git/web";
