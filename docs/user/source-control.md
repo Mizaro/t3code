@@ -47,22 +47,24 @@ glab auth login
 
 ### Bitbucket
 
-Set an access token in the server's environment:
+Set an access token in the server's environment. Bitbucket Cloud and a Bitbucket Server or Data
+Center install use the same variable. Cloud is read from Bitbucket Cloud. A Server or Data Center
+repository is read on the host in its git remote.
 
 ```bash
 export T3CODE_BITBUCKET_ACCESS_TOKEN="your-access-token"
 ```
 
-Or use an Atlassian account email and API token with read/write access to repositories and pull
-requests, plus user read access (`read:user:bitbucket`):
+For Bitbucket Cloud, an Atlassian account email and API token with read/write access to
+repositories and pull requests, plus user read access (`read:user:bitbucket`), also works:
 
 ```bash
 export T3CODE_BITBUCKET_EMAIL="you@example.com"
 export T3CODE_BITBUCKET_API_TOKEN="your-token"
 ```
 
-The access token takes precedence if both are configured. Restart the server after changing these
-variables.
+The access token takes precedence if both are configured. A repository on bitbucket.org stays on
+Bitbucket Cloud. Restart the server after changing these variables.
 
 ### Azure DevOps
 
