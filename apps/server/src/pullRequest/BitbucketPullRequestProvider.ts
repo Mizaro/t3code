@@ -1,6 +1,8 @@
 import * as Effect from "effect/Effect";
 import type { PullRequestCapabilities, PullRequestViewerPermissions } from "@t3tools/contracts";
+import { parseBitbucketServerRepositoryPath } from "@t3tools/shared/sourceControl";
 
+import * as BitbucketServerApi from "../sourceControl/BitbucketServerApi.ts";
 import * as BitbucketPullRequestApi from "./BitbucketPullRequestApi.ts";
 import {
   PullRequestProviderError,
@@ -8,6 +10,7 @@ import {
   type ProviderChangeRequest,
   type ProviderChangeRequestActivity,
   type ProviderChangeRequestDetail,
+  type ProviderChangeRequestSummary,
   type PullRequestProviderApi,
 } from "./PullRequestProvider.ts";
 import type { BitbucketPullRequest } from "./bitbucketPullRequestJson.ts";
@@ -110,8 +113,95 @@ function toChangeRequest(pullRequest: BitbucketPullRequest): ProviderChangeReque
   };
 }
 
+const EMPTY_ACTIVITY: ProviderChangeRequestActivity = {
+  comments: [],
+  commentCount: 0,
+  commentsTruncated: false,
+  reviewThreads: [],
+  commits: [],
+};
+
+const READ_ONLY_PERMISSIONS: PullRequestViewerPermissions = {
+  actions: [],
+  comment: false,
+  resolve: false,
+  verdicts: [],
+  requestReviewers: false,
+};
+
 export const make = Effect.gen(function* () {
   const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+  const serverApi = yield* BitbucketServerApi.BitbucketServerApi;
+
+  const serverRepository = (input: { readonly host: string; readonly repository: string }) => {
+    const hostname = input.host.split(":")[0]?.toLowerCase() ?? "";
+    if (
+      hostname === "bitbucket.org" ||
+      hostname === "api.bitbucket.org" ||
+      hostname.endsWith(".bitbucket.org")
+    ) {
+      return null;
+    }
+    return parseBitbucketServerRepositoryPath(input.repository);
+  };
+
+  const serverFail =
+    (operation: string) => (error: BitbucketServerApi.BitbucketServerRequestError) =>
+      new PullRequestProviderError({
+        provider: "bitbucket",
+        operation,
+        reason: error.status === 401 ? "unauthenticated" : "failed",
+        detail: error.detail,
+        cause: error,
+      });
+
+  const serverWrite = (operation: string) =>
+    Effect.fail(
+      new PullRequestProviderError({
+        provider: "bitbucket",
+        operation,
+        reason: "failed",
+        detail: "Bitbucket Server pull requests are read here. Changes stay on the host.",
+      }),
+    );
+
+  const toServerChangeRequest = (
+    pullRequest: BitbucketServerApi.BitbucketServerPullRequest,
+  ): ProviderChangeRequest => ({
+    number: pullRequest.number,
+    title: pullRequest.title,
+    url: pullRequest.url,
+    author: pullRequest.author,
+    headBranch: pullRequest.headBranch,
+    baseBranch: pullRequest.baseBranch,
+    state: pullRequest.state,
+    isDraft: pullRequest.isDraft,
+    mergeability: "unknown",
+    additions: 0,
+    deletions: 0,
+    createdAt: pullRequest.createdAt,
+    updatedAt: pullRequest.updatedAt,
+    closedAt: pullRequest.closedAt,
+    mergedAt: pullRequest.mergedAt,
+    reviewRequestLogins: [],
+    labels: [],
+  });
+
+  const toServerSummary = (
+    pullRequest: BitbucketServerApi.BitbucketServerPullRequest,
+  ): ProviderChangeRequestSummary => ({
+    number: pullRequest.number,
+    title: pullRequest.title,
+    url: pullRequest.url,
+    headBranch: pullRequest.headBranch,
+    baseBranch: pullRequest.baseBranch,
+    state: pullRequest.state,
+    isDraft: pullRequest.isDraft,
+    closedAt: pullRequest.closedAt,
+    mergedAt: pullRequest.mergedAt,
+    updatedAt: pullRequest.updatedAt,
+    author: pullRequest.author,
+  });
 
   const fail =
     (operation: string) => (error: BitbucketPullRequestApi.BitbucketPullRequestApiError) =>
@@ -150,16 +240,106 @@ export const make = Effect.gen(function* () {
     });
   };
 
+  const readCloudChangeRequest = (input: {
+    readonly repository: string;
+    readonly number: number;
+  }) => {
+    const target = { repository: input.repository, number: input.number };
+    return Effect.all(
+      [
+        api.getPullRequest(target),
+        api.getDiffStat(target),
+        recoverRead(api.getMergeability(target), "unknown" as const),
+        recoverRead(api.listChecks(target), []),
+        // A permission that could not be read is an unknown one, which is granted: a hidden
+        // Merge leaves someone entitled to it with no way through, and one Bitbucket refuses
+        // at least says why.
+        recoverRead(api.getRepositoryPermission(target), true),
+      ],
+      { concurrency: 5 },
+    ).pipe(
+      Effect.mapError(fail("getChangeRequest")),
+      Effect.map(
+        ([pullRequest, diffStat, mergeability, checks, canWrite]): ProviderChangeRequestDetail => ({
+          ...toChangeRequest(pullRequest),
+          mergeability,
+          additions: diffStat.additions,
+          deletions: diffStat.deletions,
+          changedFiles: diffStat.changedFiles,
+          body: pullRequest.body,
+          mergedAt: null,
+          closedAt: null,
+          reviewers: pullRequest.reviewers,
+          checks,
+          // Bitbucket publishes no per-repository list of allowed strategies, so the ones it
+          // supports are all offered and a strategy the repository forbids fails on merge.
+          mergeCapabilities: { merge: true, squash: true, rebase: true },
+          viewerPermissions: bitbucketViewerPermissions({ canWrite }),
+        }),
+      ),
+    );
+  };
+
+  const summaryFromDetail = (
+    detail: ProviderChangeRequestDetail,
+  ): ProviderChangeRequestSummary => ({
+    number: detail.number,
+    title: detail.title,
+    url: detail.url,
+    headBranch: detail.headBranch,
+    baseBranch: detail.baseBranch,
+    state: detail.state,
+    isDraft: detail.isDraft,
+    closedAt: detail.closedAt,
+    mergedAt: detail.mergedAt,
+    updatedAt: detail.updatedAt,
+    author: detail.author,
+    additions: detail.additions,
+    deletions: detail.deletions,
+    changedFiles: detail.changedFiles,
+    mergeability: detail.mergeability,
+    ...(detail.reviewDecision === undefined ? {} : { reviewDecision: detail.reviewDecision }),
+    ...(detail.checksState === undefined ? {} : { checksState: detail.checksState }),
+  });
+
   const provider: PullRequestProviderApi = {
     kind: "bitbucket",
     capabilities: CAPABILITIES,
 
     // Bitbucket credentials come from the server's environment rather than a checkout, so the
     // account is the same whichever workspace asks.
-    getViewer: () => api.getViewer().pipe(Effect.mapError(fail("getViewer"))),
+    getViewer: (input) =>
+      serverApi.currentUser({ cwd: input.cwd, host: input.host ?? "" }).pipe(
+        Effect.mapError(serverFail("getViewer")),
+        Effect.flatMap((login) =>
+          login === null
+            ? api.getViewer().pipe(Effect.mapError(fail("getViewer")))
+            : Effect.succeed(login),
+        ),
+      ),
 
-    listChangeRequests: (input) =>
-      api
+    listChangeRequests: (input) => {
+      const server = serverRepository(input);
+      if (server) {
+        return serverApi
+          .listPullRequests({
+            cwd: input.cwd,
+            host: input.host,
+            project: server.project,
+            slug: server.slug,
+            state: input.state,
+            limit: input.limit,
+          })
+          .pipe(
+            Effect.mapError(serverFail("listChangeRequests")),
+            Effect.map((page) => ({
+              items: page.items.map(toServerChangeRequest),
+              truncated: page.truncated,
+              continues: false,
+            })),
+          );
+      }
+      return api
         .listPullRequests({
           repository: input.repository,
           state: input.state,
@@ -176,52 +356,54 @@ export const make = Effect.gen(function* () {
             // so every page it answers is one a cursor can continue.
             continues: true,
           })),
-        ),
+        );
+    },
 
     getChangeRequest: (input) => {
-      const target = { repository: input.repository, number: input.number };
-      return Effect.all(
-        [
-          api.getPullRequest(target),
-          api.getDiffStat(target),
-          recoverRead(api.getMergeability(target), "unknown" as const),
-          recoverRead(api.listChecks(target), []),
-          // A permission that could not be read is an unknown one, which is granted: a hidden
-          // Merge leaves someone entitled to it with no way through, and one Bitbucket refuses
-          // at least says why.
-          recoverRead(api.getRepositoryPermission(target), true),
-        ],
-        { concurrency: 5 },
-      ).pipe(
-        Effect.mapError(fail("getChangeRequest")),
-        Effect.map(
-          ([
-            pullRequest,
-            diffStat,
-            mergeability,
-            checks,
-            canWrite,
-          ]): ProviderChangeRequestDetail => ({
-            ...toChangeRequest(pullRequest),
-            mergeability,
-            additions: diffStat.additions,
-            deletions: diffStat.deletions,
-            changedFiles: diffStat.changedFiles,
-            body: pullRequest.body,
-            mergedAt: null,
-            closedAt: null,
-            reviewers: pullRequest.reviewers,
-            checks,
-            // Bitbucket publishes no per-repository list of allowed strategies, so the ones it
-            // supports are all offered and a strategy the repository forbids fails on merge.
-            mergeCapabilities: { merge: true, squash: true, rebase: true },
-            viewerPermissions: bitbucketViewerPermissions({ canWrite }),
-          }),
-        ),
-      );
+      const server = serverRepository(input);
+      if (server) {
+        return serverApi
+          .getPullRequest({
+            cwd: input.cwd,
+            host: input.host,
+            project: server.project,
+            slug: server.slug,
+            number: input.number,
+          })
+          .pipe(
+            Effect.mapError(serverFail("getChangeRequest")),
+            Effect.map((pullRequest): ProviderChangeRequestDetail => ({
+              ...toServerChangeRequest(pullRequest),
+              body: pullRequest.body,
+              changedFiles: 0,
+              mergedAt: pullRequest.mergedAt,
+              closedAt: pullRequest.closedAt,
+              reviewers: [],
+              checks: [],
+              mergeCapabilities: { merge: false, squash: false, rebase: false },
+              viewerPermissions: READ_ONLY_PERMISSIONS,
+            })),
+          );
+      }
+      return readCloudChangeRequest(input);
+    },
+
+    getChangeRequestSummary: (input) => {
+      const server = serverRepository(input);
+      if (!server) return readCloudChangeRequest(input).pipe(Effect.map(summaryFromDetail));
+      return serverApi
+        .getPullRequest({
+          cwd: input.cwd,
+          host: input.host,
+          project: server.project,
+          slug: server.slug,
+          number: input.number,
+        })
+        .pipe(Effect.mapError(serverFail("getChangeRequestSummary")), Effect.map(toServerSummary));
     },
 
     getChangeRequestActivity: (input) => {
+      if (serverRepository(input)) return Effect.succeed(EMPTY_ACTIVITY);
       const target = { repository: input.repository, number: input.number };
       return Effect.all(
         [
@@ -247,105 +429,127 @@ export const make = Effect.gen(function* () {
     },
 
     getViewerPermissions: (input) =>
-      api.getRepositoryPermission({ repository: input.repository }).pipe(
-        Effect.mapError(fail("getViewerPermissions")),
-        Effect.map((canWrite) => bitbucketViewerPermissions({ canWrite })),
-      ),
+      serverRepository(input)
+        ? Effect.succeed(READ_ONLY_PERMISSIONS)
+        : api.getRepositoryPermission({ repository: input.repository }).pipe(
+            Effect.mapError(fail("getViewerPermissions")),
+            Effect.map((canWrite) => bitbucketViewerPermissions({ canWrite })),
+          ),
 
     // `/diff` answers with the whole patch and pages nothing, so the first slice is the last.
     getDiff: (input) =>
-      api
-        .getPullRequestDiff({
-          repository: input.repository,
-          number: input.number,
-          ...(input.commit === undefined ? {} : { commit: input.commit }),
-        })
-        .pipe(
-          Effect.mapError(fail("getDiff")),
-          Effect.map((diff) => ({ ...diff, nextCursor: null })),
-        ),
+      serverRepository(input)
+        ? Effect.succeed({ patch: "", truncated: false, nextCursor: null })
+        : api
+            .getPullRequestDiff({
+              repository: input.repository,
+              number: input.number,
+              ...(input.commit === undefined ? {} : { commit: input.commit }),
+            })
+            .pipe(
+              Effect.mapError(fail("getDiff")),
+              Effect.map((diff) => ({ ...diff, nextCursor: null })),
+            ),
 
     getFileRevisions: (input) =>
-      api
-        .getFileRevisions({
-          repository: input.repository,
-          number: input.number,
-          paths: input.paths,
-        })
-        .pipe(Effect.mapError(fail("getFileRevisions"))),
+      serverRepository(input)
+        ? Effect.succeed({ revisions: new Map(), complete: false })
+        : api
+            .getFileRevisions({
+              repository: input.repository,
+              number: input.number,
+              paths: input.paths,
+            })
+            .pipe(Effect.mapError(fail("getFileRevisions"))),
 
     // Users only: Bitbucket requests a review of an account, and has no group that stands in for
     // one on a pull request.
     listReviewerCandidates: (input) =>
-      api
-        .listReviewerCandidates({ repository: input.repository, number: input.number })
-        .pipe(Effect.mapError(fail("listReviewerCandidates"))),
+      serverRepository(input)
+        ? Effect.succeed({ candidates: [], truncated: false })
+        : api
+            .listReviewerCandidates({ repository: input.repository, number: input.number })
+            .pipe(Effect.mapError(fail("listReviewerCandidates"))),
 
     setReviewerRequest: (input) =>
-      api
-        .setReviewerRequest({
-          repository: input.repository,
-          number: input.number,
-          reviewers: input.reviewers,
-          requested: input.requested,
-        })
-        .pipe(Effect.mapError(fail("setReviewerRequest"))),
+      serverRepository(input)
+        ? serverWrite("setReviewerRequest")
+        : api
+            .setReviewerRequest({
+              repository: input.repository,
+              number: input.number,
+              reviewers: input.reviewers,
+              requested: input.requested,
+            })
+            .pipe(Effect.mapError(fail("setReviewerRequest"))),
 
     runAction: (input) =>
-      api
-        .runAction({
-          repository: input.repository,
-          number: input.number,
-          action: input.action,
-          ...(input.mergeMethod === undefined ? {} : { mergeMethod: input.mergeMethod }),
-        })
-        .pipe(Effect.mapError(fail("runAction"))),
+      serverRepository(input)
+        ? serverWrite("runAction")
+        : api
+            .runAction({
+              repository: input.repository,
+              number: input.number,
+              action: input.action,
+              ...(input.mergeMethod === undefined ? {} : { mergeMethod: input.mergeMethod }),
+            })
+            .pipe(Effect.mapError(fail("runAction"))),
 
     updateChangeRequest: (input) =>
-      api
-        .updateChangeRequest({
-          repository: input.repository,
-          number: input.number,
-          title: input.title,
-          body: input.body,
-        })
-        .pipe(Effect.mapError(fail("updateChangeRequest"))),
+      serverRepository(input)
+        ? serverWrite("updateChangeRequest")
+        : api
+            .updateChangeRequest({
+              repository: input.repository,
+              number: input.number,
+              title: input.title,
+              body: input.body,
+            })
+            .pipe(Effect.mapError(fail("updateChangeRequest"))),
 
     comment: (input) =>
-      api
-        .comment({ repository: input.repository, number: input.number, body: input.body })
-        .pipe(Effect.mapError(fail("comment"))),
+      serverRepository(input)
+        ? serverWrite("comment")
+        : api
+            .comment({ repository: input.repository, number: input.number, body: input.body })
+            .pipe(Effect.mapError(fail("comment"))),
 
     updateComment: (input) =>
-      api
-        .updateComment({
-          repository: input.repository,
-          number: input.number,
-          commentId: input.commentId,
-          body: input.body,
-        })
-        .pipe(Effect.mapError(fail("updateComment"))),
+      serverRepository(input)
+        ? serverWrite("updateComment")
+        : api
+            .updateComment({
+              repository: input.repository,
+              number: input.number,
+              commentId: input.commentId,
+              body: input.body,
+            })
+            .pipe(Effect.mapError(fail("updateComment"))),
 
     submitReview: (input) =>
-      api
-        .submitReview({
-          repository: input.repository,
-          number: input.number,
-          verdict: input.verdict,
-          body: input.body,
-          comments: input.comments,
-        })
-        .pipe(Effect.mapError(fail("submitReview"))),
+      serverRepository(input)
+        ? serverWrite("submitReview")
+        : api
+            .submitReview({
+              repository: input.repository,
+              number: input.number,
+              verdict: input.verdict,
+              body: input.body,
+              comments: input.comments,
+            })
+            .pipe(Effect.mapError(fail("submitReview"))),
 
     replyToThread: (input) =>
-      api
-        .replyToComment({
-          repository: input.repository,
-          number: input.number,
-          commentId: input.threadId,
-          body: input.body,
-        })
-        .pipe(Effect.mapError(fail("replyToThread"))),
+      serverRepository(input)
+        ? serverWrite("replyToThread")
+        : api
+            .replyToComment({
+              repository: input.repository,
+              number: input.number,
+              commentId: input.threadId,
+              body: input.body,
+            })
+            .pipe(Effect.mapError(fail("replyToThread"))),
 
     // Never called: `capabilities.reactions` is false, and the service refuses without it.
     setReaction: () =>
@@ -359,14 +563,16 @@ export const make = Effect.gen(function* () {
       ),
 
     setThreadResolution: (input) =>
-      api
-        .setCommentResolution({
-          repository: input.repository,
-          number: input.number,
-          commentId: input.threadId,
-          resolved: input.resolved,
-        })
-        .pipe(Effect.mapError(fail("setThreadResolution"))),
+      serverRepository(input)
+        ? serverWrite("setThreadResolution")
+        : api
+            .setCommentResolution({
+              repository: input.repository,
+              number: input.number,
+              commentId: input.threadId,
+              resolved: input.resolved,
+            })
+            .pipe(Effect.mapError(fail("setThreadResolution"))),
   };
 
   return provider;

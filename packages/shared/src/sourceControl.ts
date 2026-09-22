@@ -204,6 +204,75 @@ function isBitbucketHost(host: string): boolean {
   return host === "bitbucket.org" || hasDnsLabel(host, "bitbucket");
 }
 
+function isBitbucketCloudHost(host: string): boolean {
+  return host === "bitbucket.org" || host.endsWith(".bitbucket.org");
+}
+
+/**
+ * A hostname that already belongs to some other forge. Server detection runs after those
+ * forges in {@link detectSourceControlProviderFromRemoteUrl}; this keeps the helper itself
+ * from claiming one of their repositories just because the path contains `/scm/`.
+ */
+function isForeignForgeHost(host: string): boolean {
+  return (
+    host === "github.com" ||
+    host.endsWith(".github.com") ||
+    hasDnsLabel(host, "github") ||
+    host === "gitlab.com" ||
+    hasDnsLabel(host, "gitlab") ||
+    host === "dev.azure.com" ||
+    host.endsWith(".dev.azure.com") ||
+    host.endsWith(".visualstudio.com") ||
+    host === "codeberg.org" ||
+    hasDnsLabel(host, "forgejo") ||
+    hasDnsLabel(host, "gitea")
+  );
+}
+
+/**
+ * A Bitbucket Server / Data Center clone, recognized from the path rather than the hostname.
+ *
+ * HTTPS is `https://host/scm/{project}/{repo}.git`. SSH is `ssh://git@host:7999/{project}/{repo}.git`
+ * (port 7999 is the port Server installs). `bitbucket.org` stays Cloud even when a path happens
+ * to look like `/scm/`. A Server install whose hostname contains "bitbucket" is still Server.
+ */
+export function bitbucketServerRemote(remoteUrl: string): {
+  readonly baseUrl: string;
+  readonly project: string;
+  readonly slug: string;
+} | null {
+  const trimmed = remoteUrl.trim();
+  if (!/^(?:ssh|https?):\/\//iu.test(trimmed)) return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host.length === 0 || isBitbucketCloudHost(host) || isForeignForgeHost(host)) return null;
+
+  const segments = url.pathname
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .map((segment) => segment.replace(/\.git$/iu, "").toLowerCase());
+  const ssh = url.protocol === "ssh:";
+  if (ssh && url.port !== "7999") return null;
+
+  const scmPath = segments.length === 3 && segments[0] === "scm";
+  const sshProjectRepo = ssh && segments.length === 2;
+  const project = sshProjectRepo ? segments[0] : scmPath ? segments[1] : undefined;
+  const slug = sshProjectRepo ? segments[1] : scmPath ? segments[2] : undefined;
+  if (!project || !slug) return null;
+  if (!ssh && !scmPath) return null;
+
+  return {
+    baseUrl: ssh ? `https://${host}` : url.origin,
+    project,
+    slug,
+  };
+}
+
 /**
  * The repository path a Bitbucket Server checkout already records.
  *
@@ -270,6 +339,15 @@ export function detectSourceControlProviderFromRemoteUrl(
       kind: "azure-devops",
       name: "Azure DevOps",
       baseUrl: toBaseUrl(host),
+    };
+  }
+
+  const serverRemote = bitbucketServerRemote(remoteUrl);
+  if (serverRemote) {
+    return {
+      kind: "bitbucket",
+      name: "Bitbucket Server",
+      baseUrl: serverRemote.baseUrl,
     };
   }
 

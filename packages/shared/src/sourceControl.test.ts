@@ -110,6 +110,58 @@ describe("detectSourceControlProviderFromRemoteUrl", () => {
     });
   });
 
+  it("detects Bitbucket Server from the clone path, including a hostname that contains bitbucket", () => {
+    expect(
+      detectSourceControlProviderFromRemoteUrl("https://git.source.acme.com/scm/PROJ/t3code.git"),
+    ).toEqual({
+      kind: "bitbucket",
+      name: "Bitbucket Server",
+      baseUrl: "https://git.source.acme.com",
+    });
+    expect(
+      detectSourceControlProviderFromRemoteUrl(
+        "ssh://git@git.source.acme.com:7999/PROJ/t3code.git",
+      ),
+    ).toEqual({
+      kind: "bitbucket",
+      name: "Bitbucket Server",
+      baseUrl: "https://git.source.acme.com",
+    });
+    expect(
+      detectSourceControlProviderFromRemoteUrl("https://bitbucket.example.com/scm/PROJ/t3code.git"),
+    ).toEqual({
+      kind: "bitbucket",
+      name: "Bitbucket Server",
+      baseUrl: "https://bitbucket.example.com",
+    });
+    expect(
+      detectSourceControlProviderFromRemoteUrl("http://127.0.0.1:7990/scm/PROJ/t3code.git"),
+    ).toEqual({
+      kind: "bitbucket",
+      name: "Bitbucket Server",
+      baseUrl: "http://127.0.0.1:7990",
+    });
+  });
+
+  it("keeps bitbucket.org on Bitbucket Cloud and a cloud-style path on a self-hosted hostname", () => {
+    expect(
+      detectSourceControlProviderFromRemoteUrl("https://bitbucket.org/scm/PROJ/t3code.git"),
+    ).toEqual({
+      kind: "bitbucket",
+      name: "Bitbucket",
+      baseUrl: "https://bitbucket.org",
+    });
+    expect(
+      detectSourceControlProviderFromRemoteUrl("https://bitbucket.example.com/workspace/repo.git"),
+    ).toMatchObject({
+      kind: "bitbucket",
+      name: "Bitbucket Self-Hosted",
+    });
+    expect(
+      detectSourceControlProviderFromRemoteUrl("https://gitlab.com/scm/group/repo.git")?.kind,
+    ).toBe("gitlab");
+  });
+
   it("matches self-hosted providers by complete DNS labels", () => {
     expect(
       detectSourceControlProviderFromRemoteUrl("https://github.example.com/owner/repo.git")?.kind,
