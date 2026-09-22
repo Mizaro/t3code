@@ -51,6 +51,25 @@ describe("normalizeGitRemoteUrl", () => {
     );
   });
 
+  it("gives a Bitbucket Server repository the same key over SSH as over HTTPS", () => {
+    const https = normalizeGitRemoteUrl("https://git.source.acme.com/scm/PROJ/t3code.git");
+    expect(https).toBe("git.source.acme.com/scm/proj/t3code");
+    expect(normalizeGitRemoteUrl("ssh://git@git.source.acme.com:7999/PROJ/t3code.git")).toBe(https);
+    expect(normalizeGitRemoteUrl("ssh://git@bitbucket.corp.example:7999/PROJ/t3code.git")).toBe(
+      "bitbucket.corp.example/scm/proj/t3code",
+    );
+    // Cloud, and other forges that happen to listen on 7999, keep the path they were given.
+    expect(normalizeGitRemoteUrl("git@bitbucket.org:workspace/repo.git")).toBe(
+      "bitbucket.org/workspace/repo",
+    );
+    expect(normalizeGitRemoteUrl("ssh://git@github.com:7999/acme/web.git")).toBe(
+      "github.com/acme/web",
+    );
+    expect(normalizeGitRemoteUrl("ssh://git@gitlab.com:7999/group/project.git")).toBe(
+      "gitlab.com/group/project",
+    );
+  });
+
   it("gives an Azure DevOps repository the same key over SSH as over HTTPS", () => {
     expect(normalizeGitRemoteUrl("git@ssh.dev.azure.com:v3/T3Tools/Platform/T3Code")).toBe(
       "dev.azure.com/t3tools/platform/_git/t3code",

@@ -55,9 +55,37 @@ describe("parseChangeRequestUrl", () => {
     );
   });
 
+  it("reads a Bitbucket Server pull request as the checkout path, on any host", () => {
+    expect(
+      parseChangeRequestUrl(
+        "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/8623",
+      ),
+    ).toEqual({
+      host: "git.source.acme.com",
+      repository: "scm/proj/t3code",
+      number: 8623,
+    });
+    expect(
+      parseChangeRequestUrl(
+        "https://bitbucket.corp.example/projects/PROJ/repos/t3code/pull-requests/8623/overview?w=1",
+      ),
+    ).toEqual({
+      host: "bitbucket.corp.example",
+      repository: "scm/proj/t3code",
+      number: 8623,
+    });
+  });
+
   it("reads Bitbucket and both Azure DevOps URL forms", () => {
     expect(parseChangeRequestUrl("https://bitbucket.org/workspace/repo/pull-requests/5")).toEqual({
       host: "bitbucket.org",
+      repository: "workspace/repo",
+      number: 5,
+    });
+    expect(
+      parseChangeRequestUrl("https://bitbucket.corp.example/workspace/repo/pull-requests/5"),
+    ).toEqual({
+      host: "bitbucket.corp.example",
       repository: "workspace/repo",
       number: 5,
     });
@@ -137,6 +165,14 @@ describe("siblingPullRequestUrl", () => {
       "https://bitbucket.org/acme/web/pull-requests/43",
     ],
     [
+      "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/8623/overview?w=1",
+      "https://git.source.acme.com/projects/PROJ/repos/t3code/pull-requests/43",
+    ],
+    [
+      "http://bitbucket.corp.example:7990/projects/PROJ/repos/t3code/pull-requests/8623",
+      "http://bitbucket.corp.example:7990/projects/PROJ/repos/t3code/pull-requests/43",
+    ],
+    [
       "https://dev.azure.com/acme/project/_git/web/pullrequest/42?view=files",
       "https://dev.azure.com/acme/project/_git/web/pullrequest/43",
     ],
@@ -170,6 +206,48 @@ describe("changeRequestUrlFor", () => {
   ])("preserves the matching Forgejo web origin from %s", (remoteUrl, origin) => {
     expect(changeRequestUrlFor("forgejo", "forge.example", "git/owner/repo", 42, remoteUrl)).toBe(
       `${origin}/git/owner/repo/pulls/42`,
+    );
+  });
+
+  it("writes a Server browser URL for a Server checkout and leaves Cloud URLs alone", () => {
+    const server = changeRequestUrlFor(
+      "bitbucket",
+      "git.source.acme.com",
+      "scm/proj/t3code",
+      8623,
+      "https://git.source.acme.com/scm/PROJ/t3code.git",
+    );
+    expect(server).toBe(
+      "https://git.source.acme.com/projects/proj/repos/t3code/pull-requests/8623",
+    );
+    expect(parseChangeRequestUrl(server!)).toEqual({
+      host: "git.source.acme.com",
+      repository: "scm/proj/t3code",
+      number: 8623,
+    });
+    expect(
+      changeRequestUrlFor(
+        "bitbucket",
+        "git.source.acme.com",
+        "scm/proj/t3code",
+        8623,
+        "ssh://git@git.source.acme.com:7999/PROJ/t3code.git",
+      ),
+    ).toBe("https://git.source.acme.com/projects/proj/repos/t3code/pull-requests/8623");
+    expect(
+      changeRequestUrlFor(
+        "bitbucket",
+        "bitbucket.corp.example",
+        "scm/proj/t3code",
+        7,
+        "https://bitbucket.corp.example/scm/PROJ/t3code.git",
+      ),
+    ).toBe("https://bitbucket.corp.example/projects/proj/repos/t3code/pull-requests/7");
+    expect(changeRequestUrlFor("bitbucket", "bitbucket.org", "workspace/repo", 5)).toBe(
+      "https://bitbucket.org/workspace/repo/pull-requests/5",
+    );
+    expect(changeRequestUrlFor("bitbucket", "bitbucket.corp.example", "workspace/repo", 5)).toBe(
+      "https://bitbucket.corp.example/workspace/repo/pull-requests/5",
     );
   });
 

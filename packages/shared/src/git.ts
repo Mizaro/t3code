@@ -128,6 +128,40 @@ function azureDevOpsRepositoryKey(host: string, segments: ReadonlyArray<string>)
 }
 
 /**
+ * The checkout key for a Bitbucket Server SSH clone, or null for anything else.
+ *
+ * Server's HTTPS remote is `/scm/{project}/{repo}.git`, so the recorded path is
+ * `scm/{project}/{repo}`. Its SSH remote is `ssh://git@host:7999/{project}/{repo}.git` and would
+ * otherwise record `{project}/{repo}`, a different repository to every comparison against that
+ * HTTPS checkout or against a browser URL rewritten into the same spelling. Port 7999 is the
+ * SSH port Server installs on; other forges are left alone.
+ */
+function bitbucketServerSshRepositoryKey(url: URL, segments: ReadonlyArray<string>): string | null {
+  if (url.protocol !== "ssh:" || url.port !== "7999" || segments.length !== 2) return null;
+  const host = url.hostname;
+  if (
+    host === "bitbucket.org" ||
+    host.endsWith(".bitbucket.org") ||
+    host === "github.com" ||
+    host.endsWith(".github.com") ||
+    host.split(".").includes("github") ||
+    host === "gitlab.com" ||
+    host.split(".").includes("gitlab") ||
+    host === "dev.azure.com" ||
+    host.endsWith(".dev.azure.com") ||
+    host.endsWith(".visualstudio.com") ||
+    host === "codeberg.org" ||
+    host.split(".").includes("forgejo") ||
+    host.split(".").includes("gitea")
+  ) {
+    return null;
+  }
+  const [project, repository] = segments;
+  if (!project || !repository) return null;
+  return `${host}/scm/${project}/${repository}`;
+}
+
+/**
  * Normalize a git remote URL into a stable comparison key.
  */
 export function normalizeGitRemoteUrl(value: string): string {
@@ -144,6 +178,7 @@ export function normalizeGitRemoteUrl(value: string): string {
       if (url.hostname && repositorySegments.length > 1) {
         return (
           azureDevOpsRepositoryKey(url.hostname, repositorySegments) ??
+          bitbucketServerSshRepositoryKey(url, repositorySegments) ??
           `${url.hostname}/${repositorySegments.join("/")}`
         );
       }
